@@ -1,0 +1,5 @@
+REMARK Test Ligand 2
+ATOM      1  C    LIG     1       5.500   5.500   5.500  1.00  0.00  0.120
+ATOM      2  N    LIG     1       6.500   5.500   5.500  1.00  0.00 -0.350
+ENDROOT
+TORSDOF 1
