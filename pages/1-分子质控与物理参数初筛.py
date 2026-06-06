@@ -1,237 +1,323 @@
-import streamlit as st   
-import pandas as pd   
-import numpy as np   
-import matplotlib.pyplot as plt   
-from rdkit import Chem   
-from rdkit.Chem import Descriptors, Lipinski   
-import io  
-import sys  
-import platform
+# -*- coding: utf-8 -*-
+import streamlit as st
+import pandas as pd
+import numpy as np
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Lipinski, Crippen
+import io
+import sys
 
-# 1. 解决标准输出流可能存在的编码问题  
-if sys.stdout.encoding != 'utf-8':  
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')  
+# 解决输出流编码问题
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# 2. 更加全面的字体配置，兼容 Windows, macOS, Linux (如 Streamlit Cloud) 
-def set_matplot_zh_font():
-    # 自动识别系统并配置字体优先级
-    plt.rcParams['font.sans-serif'] = [
-        'SimHei',             # Windows 常用黑体
-        'Microsoft YaHei',    # Windows 微软雅黑
-        'Heiti TC',           # macOS 繁体黑体
-        'Arial Unicode MS',   # macOS 兼容中文
-        'WenQuanYi Micro Hei',# Linux/Ubuntu 下的开源中文字体（部署Streamlit关键）
-        'DejaVu Sans',        # 备用英文
-        'sans-serif'
+st.set_page_config(page_title="数据质控与清洗", layout="wide")
+
+# 统一注入样式
+st.markdown("""
+<style>
+    .main { background-color: #f8fafc; }
+    .blue-banner {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+        color: #ffffff;
+        padding: 30px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+    }
+    .blue-banner h1 { color: #ffffff !important; margin: 0 0 8px 0 !important; font-size: 28px; }
+    .blue-banner p { color: #cbd5e1 !important; margin: 0 !important; font-size: 14px; }
+    .card {
+        background-color: #ffffff;
+        padding: 24px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+    }
+    .section-header {
+        background-color: #f1f5f9;
+        padding: 10px 16px;
+        border-radius: 8px;
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 16px;
+        margin-bottom: 18px;
+        border-left: 5px solid #1e3a8a;
+        display: flex;
+        align-items: center;
+    }
+    .report-card {
+        background-color: #ffffff;
+        border-left: 4px solid #1e3a8a;
+        padding: 20px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        margin-top: 15px;
+    }
+    .stButton>button {
+        background-color: #1e3a8a !important;
+        color: white !important;
+        border-radius: 8px !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="blue-banner">
+    <h1>分子数据质控与清洗中心</h1>
+    <p>提供自定义阈值的理化性质筛选通道。清洗后的数据将直接作为缓存，供应给下游的物性剖析、药代评估和模型训练模块。</p>
+</div>
+""", unsafe_allow_html=True)
+
+# 初始化计算所得的数据容器
+if "raw_calculated_df" not in st.session_state:
+    st.session_state["raw_calculated_df"] = None
+
+# ==========================================
+# 布局配置 1：文件上传与格式向导
+# ==========================================
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown('<div class="section-header">导入分子结构原始文件</div>', unsafe_allow_html=True)
+
+col_up, col_tips = st.columns([0.45, 0.55])
+
+with col_up:
+    uploaded_file = st.file_uploader("选择待质控的 CSV 表格文件：", type=["csv"])
+    
+with col_tips:
+    st.markdown("""
+    <div style="background-color: #f8fafc; border: 1px dashed #cbd5e1; padding: 15px; border-radius: 8px; font-size: 13px; color: #475569; line-height: 1.6;">
+        <b>⚠️ 原始文件表头规范说明：</b><br>
+        1. <b>核心主键</b>：必须含有名为 <code>smiles</code> 的列，系统将其作为判定分子合法性及三维拓扑特征的基础。<br>
+        2. <b>其他特征（选填）</b>：可以包含 <code>label</code> 或其他活性测试字段，清洗时这些数据会同步保留输出。
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# 理化性质全局计算（只在初次载入或重换文件时运算）
+# ==========================================
+if uploaded_file is not None:
+    # 读入原始表格
+    df_input = pd.read_csv(uploaded_file)
+    
+    if "smiles" not in df_input.columns:
+        st.error("表格结构异常：未能在您的数据表中检测到 'smiles' 字段列，请检查表头名称。")
+    else:
+        # 检测是否需要为当前文件重新计算描述符
+        # 如果缓存为空，或者上传的文件行数/内容与缓存内容不合，则触发计算
+        trigger_calc = False
+        if st.session_state["raw_calculated_df"] is None:
+            trigger_calc = True
+        else:
+            if len(st.session_state["raw_calculated_df"]) != len(df_input):
+                trigger_calc = True
+                
+        if trigger_calc:
+            with st.spinner("正在解析化学结构并预计算分子描述符参数..."):
+                mws, logps, tpsas, hbds, hbas, rbs, valids = [], [], [], [], [], [], []
+                
+                for s in df_input["smiles"]:
+                    try:
+                        s_str = str(s).strip()
+                        m = Chem.MolFromSmiles(s_str)
+                        if m:
+                            mws.append(Descriptors.MolWt(m))
+                            logps.append(Crippen.MolLogP(m))
+                            tpsas.append(Descriptors.TPSA(m))
+                            hbds.append(Lipinski.NumHDonors(m))
+                            hbas.append(Lipinski.NumHAcceptors(m))
+                            rbs.append(Descriptors.NumRotatableBonds(m))
+                            valids.append(True)
+                        else:
+                            # 异常 SMILES
+                            mws.append(np.nan); logps.append(np.nan); tpsas.append(np.nan)
+                            hbds.append(np.nan); hbas.append(np.nan); rbs.append(np.nan)
+                            valids.append(False)
+                    except:
+                        mws.append(np.nan); logps.append(np.nan); tpsas.append(np.nan)
+                        hbds.append(np.nan); hbas.append(np.nan); rbs.append(np.nan)
+                        valids.append(False)
+                        
+                df_calc = df_input.copy()
+                df_calc["MW"] = mws
+                df_calc["LogP"] = logps
+                df_calc["TPSA"] = tpsas
+                df_calc["HBD"] = hbds
+                df_calc["HBA"] = hbas
+                df_calc["RotatableBonds"] = rbs
+                df_calc["_is_valid_smiles_"] = valids
+                
+                st.session_state["raw_calculated_df"] = df_calc
+                st.success("理化参数初始化转换完毕。")
+
+# ==========================================
+# 布局配置 2：理化限制区间自主配置（滑块过滤）
+# ==========================================
+if st.session_state["raw_calculated_df"] is not None:
+    df_work = st.session_state["raw_calculated_df"].copy()
+    
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">自定义分子性质质控阈值范围</div>', unsafe_allow_html=True)
+    
+    st.markdown("*调节以下各物理化学常数的允许区间，系统将依据您选出的规则过滤出高纯净度的数据载体。*")
+    
+    col_filter_1, col_filter_2, col_filter_3 = st.columns(3)
+    
+    with col_filter_1:
+        # 分子量过滤区间
+        mw_min, mw_max = float(df_work["MW"].min()), float(df_work["MW"].max())
+        if np.isnan(mw_min) or np.isnan(mw_max) or mw_min == mw_max:
+            mw_min, mw_max = 0.0, 1000.0
+        mw_range = st.slider(
+            "分子量允许范围 (MW, Da)：",
+            min_value=0.0,
+            max_value=1200.0,
+            value=(max(0.0, mw_min), min(800.0, mw_max)),
+            step=10.0
+        )
+        
+        # 脂水分配系数过滤区间
+        logp_min, logp_max = float(df_work["LogP"].min()), float(df_work["LogP"].max())
+        if np.isnan(logp_min) or np.isnan(logp_max) or logp_min == logp_max:
+            logp_min, logp_max = -5.0, 10.0
+        logp_range = st.slider(
+            "脂水分配系数允许范围 (LogP)：",
+            min_value=-8.0,
+            max_value=12.0,
+            value=(max(-4.0, logp_min), min(6.0, logp_max)),
+            step=0.1
+        )
+        
+    with col_filter_2:
+        # 极性拓扑表面积过滤区间
+        tpsa_min, tpsa_max = float(df_work["TPSA"].min()), float(df_work["TPSA"].max())
+        if np.isnan(tpsa_min) or np.isnan(tpsa_max) or tpsa_min == tpsa_max:
+            tpsa_min, tpsa_max = 0.0, 300.0
+        tpsa_range = st.slider(
+            "极性拓扑表面积范围 (TPSA, Å²)：",
+            min_value=0.0,
+            max_value=350.0,
+            value=(max(0.0, tpsa_min), min(150.0, tpsa_max)),
+            step=5.0
+        )
+        
+        # 柔性旋转键数过滤区间
+        rb_min, rb_max = float(df_work["RotatableBonds"].min()), float(df_work["RotatableBonds"].max())
+        if np.isnan(rb_min) or np.isnan(rb_max) or rb_min == rb_max:
+            rb_min, rb_max = 0.0, 20.0
+        rb_range = st.slider(
+            "可旋转单键个数上限和下限 (RotatableBonds)：",
+            min_value=0,
+            max_value=30,
+            value=(int(max(0, rb_min)), int(min(12, rb_max))),
+            step=1
+        )
+        
+    with col_filter_3:
+        # 氢键供体数范围
+        hbd_min, hbd_max = float(df_work["HBD"].min()), float(df_work["HBD"].max())
+        if np.isnan(hbd_min) or np.isnan(hbd_max) or hbd_min == hbd_max:
+            hbd_min, hbd_max = 0.0, 15.0
+        hbd_range = st.slider(
+            "氢键供体数量范围 (HBD)：",
+            min_value=0,
+            max_value=20,
+            value=(int(max(0, hbd_min)), int(min(6, hbd_max))),
+            step=1
+        )
+        
+        # 氢键受体数范围
+        hba_min, hba_max = float(df_work["HBA"].min()), float(df_work["HBA"].max())
+        if np.isnan(hba_min) or np.isnan(hba_max) or hba_min == hba_max:
+            hba_min, hba_max = 0.0, 25.0
+        hba_range = st.slider(
+            "氢键受体数量范围 (HBA)：",
+            min_value=0,
+            max_value=25,
+            value=(int(max(0, hba_min)), int(min(12, hba_max))),
+            step=1
+        )
+        
+    # 其他常用清洗项选项
+    st.markdown("---")
+    st.markdown("**结构规范性与除杂处理选项：**")
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        drop_duplicates = st.checkbox("去重：自动剔除包含重复 SMILES 的化合物记录", value=True)
+    with col_opt2:
+        drop_invalid = st.checkbox("质量审计：自动过滤无法被 RDKit 解析的错误化学式结构", value=True)
+        
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # ==========================================
+    # 执行过滤动作并更新全局缓存
+    # ==========================================
+    # 执行过滤条件
+    filtered_df = df_work.copy()
+    
+    # 1. 踢除无效SMILES
+    if drop_invalid:
+        filtered_df = filtered_df[filtered_df["_is_valid_smiles_"] == True]
+        
+    # 2. 去重
+    if drop_duplicates:
+        filtered_df = filtered_df.drop_duplicates(subset=["smiles"])
+        
+    # 3. 范围截断
+    filtered_df = filtered_df[
+        (filtered_df["MW"] >= mw_range[0]) & (filtered_df["MW"] <= mw_range[1]) &
+        (filtered_df["LogP"] >= logp_range[0]) & (filtered_df["LogP"] <= logp_range[1]) &
+        (filtered_df["TPSA"] >= tpsa_range[0]) & (filtered_df["TPSA"] <= tpsa_range[1]) &
+        (filtered_df["RotatableBonds"] >= rb_range[0]) & (filtered_df["RotatableBonds"] <= rb_range[1]) &
+        (filtered_df["HBD"] >= hbd_range[0]) & (filtered_df["HBD"] <= hbd_range[1]) &
+        (filtered_df["HBA"] >= hba_range[0]) & (filtered_df["HBA"] <= hba_range[1])
     ]
-    plt.rcParams['axes.unicode_minus'] = False # 正常显示负号
-
-set_matplot_zh_font()
-   
-# 设置页面宽屏模式
-st.set_page_config(page_title="数据清洗与质控", layout="wide")   
-   
-# 样式 CSS 保持并微调以适应全宽布局
-st.markdown("""   
-<style>   
-    .main { background-color: #f8fafc; }   
-    .blue-banner {   
-        background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);   
-        color: #ffffff;   
-        padding: 30px;   
-        border-radius: 12px;   
-        margin-bottom: 25px;   
-    }   
-    .blue-banner h1 { color: #ffffff !important; margin: 0 0 8px 0 !important; font-size: 28px; }   
-    .blue-banner p { color: #cbd5e1 !important; margin: 0 !important; font-size: 14px; }   
-    .card {   
-        background-color: #ffffff;   
-        padding: 24px;   
-        border-radius: 12px;   
-        border: 1px solid #e2e8f0;   
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);   
-        margin-bottom: 20px;   
-    }   
-    .card h4 { color: #0f172a !important; font-weight: 700; margin-top: 0px; margin-bottom: 15px; }   
-    .report-card {   
-        background-color: #ffffff;   
-        border-left: 4px solid #1e3a8a;   
-        padding: 20px;   
-        border-radius: 8px;   
-        border: 1px solid #e2e8f0;   
-    }   
-    .stButton>button {   
-        background-color: #1e3a8a !important;   
-        color: white !important;   
-        border-radius: 8px !important;   
-    }   
-</style>   
-""", unsafe_allow_html=True)   
-   
-st.markdown("""   
-<div class="blue-banner">   
-    <h1>数据清洗与质控过滤</h1>   
-    <p>检查分子结构的合法性，并根据分子量、脂溶性等标准指标快速过滤并形成标准数据集。</p>   
-</div>   
-""", unsafe_allow_html=True)   
-
-# ==========================================
-# 布局重构 1：将过滤配置与文件上传水平放置，节省头部空间
-# ==========================================
-col_config, col_upload = st.columns([0.45, 0.55])
-
-with col_config:
-    st.markdown('<div class="card">', unsafe_allow_html=True)   
-    st.subheader("⚙️ 过滤条件配置")   
-    f_lip = st.checkbox("必须符合 Lipinski 五规则（允许 1 项超标）", value=True)   
-    f_mw = st.checkbox("限制分子量 (MW) 在 160 ~ 500 Da 之间", value=True)   
-    f_logp = st.checkbox("限制脂水分配系数 (LogP) 在 -2 ~ 5 之间", value=True)   
-    st.markdown('</div>', unsafe_allow_html=True) 
-
-with col_upload:
-    st.markdown('<div class="card">', unsafe_allow_html=True)   
-    st.subheader("📂 导入分子数据集")   
-    csv_file = st.file_uploader("导入分子数据集表 (CSV格式)", type=["csv"], help="表格必须含 smiles 与分类标签 label 列")   
-    st.markdown('</div>', unsafe_allow_html=True)   
-
-# ==========================================
-# 布局重构 2：文件输入后的预览与核心逻辑全部展开为 “上下结构”
-# ==========================================
-if csv_file:
-    df = pd.read_csv(csv_file)
     
-    # --- 1号块: 读入预览块 (占据全宽，不挤在右侧) ---
-    st.markdown('<div class="card">', unsafe_allow_html=True)   
-    st.subheader("🔍 原始数据集预览")   
-    st.info(f"读取到分子共计：{len(df)} 种")   
-    st.dataframe(df.head(6), use_container_width=True)   
-    st.markdown('</div>', unsafe_allow_html=True)   
+    # 清理掉用于标记内部结构的临时字段
+    if "_is_valid_smiles_" in filtered_df.columns:
+        filtered_df = filtered_df.drop(columns=["_is_valid_smiles_"])
+        
+    # 保存结果并提交至 Session state
+    st.session_state["cleaned_df"] = filtered_df.copy()
     
-    if "smiles" not in df.columns:   
-        st.error("表格结构异常：缺失了名为 smiles 的分子式列。")   
-    else:   
-        # 初始化 session_state，持久化数据
-        if "cleaned_df" not in st.session_state:  
-            st.session_state["cleaned_df"] = None  
-            st.session_state["raw_len"] = 0  
-            st.session_state["orig_mws"] = []  
-            st.session_state["final_mws"] = []  
-
-        # 清洗动作执行排在正中间 (大按钮)
-        if st.button("🚀 开始清洗数据", type="primary", use_container_width=True):   
-            progress_bar = st.progress(0)   
-            status_text = st.empty()   
-               
-            cleaned_indices = []   
-            orig_mws, final_mws = [], []   
-            orig_logps, final_logps = [], []   
-            raw_len = len(df)   
-               
-            for idx, row in df.iterrows():   
-                if raw_len > 20 and idx % max(1, raw_len // 20) == 0:   
-                    val = (idx + 1) / raw_len   
-                    progress_bar.progress(min(val, 1.0))   
-                    status_text.text(f"质控计算中：{int(val*100)}% ({idx+1}/{raw_len})")   
-                   
-                s = row["smiles"]   
-                try:   
-                    # 安全检查
-                    if pd.isna(s) or not isinstance(s, str):  
-                        continue  
-                    s = s.strip()  
-                    mol = Chem.MolFromSmiles(s)   
-                    if mol is None:   
-                        continue   
-                       
-                    mw = Descriptors.MolWt(mol)   
-                    logp = Descriptors.MolLogP(mol)   
-                       
-                    orig_mws.append(mw)   
-                    orig_logps.append(logp)   
-                       
-                    hbd = Lipinski.NumHDonors(mol)   
-                    hba = Lipinski.NumHAcceptors(mol)   
-                       
-                    if f_lip:   
-                        lip_violations = sum([mw > 500, logp > 5, hbd > 5, hba > 10])   
-                        if lip_violations > 1:   
-                            continue   
-                    if f_mw and not (160 <= mw <= 500):   
-                        continue   
-                    if f_logp and not (-2 <= logp <= 5):   
-                        continue   
-                           
-                    cleaned_indices.append(idx)   
-                    final_mws.append(mw)   
-                    final_logps.append(logp)   
-                except Exception:   
-                    continue   
-               
-            progress_bar.empty()   
-            status_text.empty()   
-               
-            cleaned_df = df.iloc[cleaned_indices].reset_index(drop=True)   
-            
-            # 存入 session_state
-            st.session_state["cleaned_df"] = cleaned_df   
-            st.session_state["raw_len"] = raw_len  
-            st.session_state["orig_mws"] = orig_mws  
-            st.session_state["final_mws"] = final_mws  
-
-        # --- 2号块: 结果上下排版区 (清洗完毕后展示) ---
-        if st.session_state["cleaned_df"] is not None:  
-            cleaned_df = st.session_state["cleaned_df"]  
-            raw_len = st.session_state["raw_len"]  
-            orig_mws = st.session_state["orig_mws"]  
-            final_mws = st.session_state["final_mws"]  
-
-            # 1. 结果表格展示 (全宽)
-            st.markdown('<div class="card">', unsafe_allow_html=True)   
-            st.subheader("📋 清洗后所得标准数据集 (前10行记录)")   
-            st.dataframe(cleaned_df.head(10), use_container_width=True)   
-            st.markdown('</div>', unsafe_allow_html=True)   
-
-            # 2. 统计图表区 (由于宽度大，重新排版柱状图长宽比，避免扭曲)
-            st.markdown('<div class="card">', unsafe_allow_html=True)   
-            st.subheader("📊 过滤前后数据统计屏")   
-            
-            # 使用大一号且扁平的比例，适合流式上下阅读
-            fig, ax = plt.subplots(figsize=(8, 3))   
-            bars = ax.barh(["质控前分子数", "质控后分子数"], [raw_len, len(cleaned_df)], color=["#cbd5e1", "#1e3a8a"], height=0.5)   
-            ax.set_xlabel("分子统计数量", fontsize=10)   
-            
-            # 在条形图上添加数值标签
-            for bar in bars:
-                width = bar.get_width()
-                ax.text(width + (raw_len * 0.01), bar.get_y() + bar.get_height()/2, f'{int(width)}', 
-                        va='center', ha='left', fontsize=10, fontweight='bold')
-            
-            ax.spines['top'].set_visible(False)   
-            ax.spines['right'].set_visible(False) 
-            ax.spines['left'].set_visible(False) 
-            plt.tight_layout()
-            
-            # 使用 Streamlit 渲染 Matplotlib 图片
-            st.pyplot(fig)   
-            plt.close(fig) # 释放内存
-            st.markdown('</div>', unsafe_allow_html=True)   
-               
-            # 3. 诊断报告 (全宽)
-            avg_mw_diff = np.mean(final_mws) - np.mean(orig_mws) if final_mws and orig_mws else 0   
-            st.markdown(f"""   
-            <div class="report-card">   
-                <h4 style="margin-top:0px; color:#1e3a8a !important;">🔬 数据清洗质控诊断报告</h4>   
-                <p style="color:#475569; font-size:14px; line-height:1.6; margin:0;">   
-                    数据质控流程判定完毕。系统已从原数据库的 {raw_len} 个分子中清除了 <strong>{raw_len - len(cleaned_df)}</strong> 个不合规分子（数据通过保留率：<strong>{(len(cleaned_df)/raw_len * 100):.2f}%</strong>）。   
-                    质控后整体小分子均分子量发生 <strong>{avg_mw_diff:.2f} Da</strong> 的位移。<br>   
-                    移去物理化学常数过大、或已知存在结构错误的配体原子体系，对于避免后续的建模过拟合具备重要保障意义。   
-                </p>   
-            </div>   
-            """, unsafe_allow_html=True)   
-               
-            # 4. 下载按钮 (底部，占据主屏)
-            csv = cleaned_df.to_csv(index=False).encode('utf-8-sig')   
-            st.markdown("<br>", unsafe_allow_html=True)   
-            st.download_button("💾 导出质控后的分子数据集 (CSV)", csv, "QC_Cleaned_Dataset.csv", use_container_width=True)   
-else:   
-    st.info("💡 提示：请先在栏目上方上传含有 SMILES 结构的 CSV 数据表。")
+    # ==========================================
+    # 预处理清洗报告明细展示
+    # ==========================================
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">数据清洗质控报告</div>', unsafe_allow_html=True)
+    
+    col_out_l, col_out_r = st.columns([0.4, 0.6])
+    
+    with col_out_l:
+        st.markdown(f"""
+        <div class="report-card" style="margin-top:0px; background-color: #f8fafc;">
+            <p style="margin: 0; font-size: 14px; color: #1e3a8a; font-weight: bold;">📊 筛选前/后样本统计对比：</p>
+            <hr style="border: 0; border-top: 1px solid #cbd5e1; margin: 10px 0;">
+            <table style="width:100%; font-size:13px; color:#475569;">
+                <tr><td>原始总行数：</td><td style="text-align:right; font-weight:bold;">{len(df_input)} 个</td></tr>
+                <tr><td>清洗后保留值：</td><td style="text-align:right; font-weight:bold; color: #16a34a;">{len(filtered_df)} 个</td></tr>
+                <tr><td>过滤淘汰行数：</td><td style="text-align:right; font-weight:bold; color: #dc2626;">{len(df_input) - len(filtered_df)} 个</td></tr>
+                <tr><td>有效保留率：</td><td style="text-align:right; font-weight:bold;">{(len(filtered_df)/len(df_input)*100):.2f}%</td></tr>
+            </table>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_out_r:
+        st.markdown("🌐 **清洗筛选后的分子库预览：**")
+        st.dataframe(filtered_df.head(10), use_container_width=True)
+        
+        # 提供导出下载
+        csv_clean_data = filtered_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            "💾 下载质控后的物理化学性质分子表 (CSV)",
+            csv_clean_data,
+            "cleaned_properties_dataset.csv",
+            "text/csv",
+            use_container_width=True
+        )
+        
+    st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.info("提示：请先在栏目上方导入待处理的 CSV 数据表以激活数据过滤组件。")
