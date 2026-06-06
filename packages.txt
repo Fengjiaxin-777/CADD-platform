@@ -2,3 +2,10 @@ libxrender1
 libxext6
 libfontconfig1
 libcairo2
+swig
+libcairo2-dev
+libpng-dev
+libboost-all-dev
+g++
+make
+openbabel
