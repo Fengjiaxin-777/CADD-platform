@@ -11,7 +11,7 @@ import sys
 if sys.stdout.encoding != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# 字体配置，多系统兼容方案（特别针对 Linux 部署环境加入了 WenQuanYi）
+# 字体配置，多系统兼容方案（特别针对 Linux/Streamlit Cloud 部署环境加入了 WenQuanYi）
 def set_matplot_zh_font():
     plt.rcParams['font.sans-serif'] = [
         'SimHei',             # Windows 黑体
