@@ -1,8 +1,0 @@
-REMARK TEST Receptor Protein
-ATOM      1  N   ALA A   1      10.000  10.000  10.000  1.00  0.00     0.000
-ATOM      2  CA  ALA A   1      11.000  10.000  10.000  1.00  0.00     0.000
-ATOM      3  C   ALA A   1      11.707  11.136  10.000  1.00  0.00     0.000
-ATOM      4  O   ALA A   1      12.901  11.136  10.000  1.00  0.00    -0.550
-ATOM      5  CB  ALA A   1      11.000   9.364  11.268  1.00  0.00     0.000
-ENDROOT
-TORSDOF 0
