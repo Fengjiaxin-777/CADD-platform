@@ -9,12 +9,11 @@ import tempfile
 import time  
 from pathlib import Path  
 import zipfile  
-   
-   
+  
+  
 st.set_page_config(page_title="分子三维物理对接", layout="wide")  
   
   
-   
 # CSS 样式定义，彻底移除了 .card DOM 类，通过原生 stVerticalBlockBorderLine 完成卡片立体风化美化  
 st.markdown("""   
 <style>   
@@ -51,16 +50,16 @@ st.markdown("""
     }   
 </style>   
 """, unsafe_allow_html=True)   
-   
-   
+  
+  
 st.markdown("""   
 <div class="blue-banner">   
     <h1>三维配体受体物理对接</h1>   
     <p>预测小分子在目标蛋白质活性口袋中的非共价键合姿态，解算对接结合亲和自由能并定位关键相互作用。</p>   
 </div>   
 """, unsafe_allow_html=True)   
-   
-   
+  
+  
 # initialize session state keys   
 if "results_df" not in st.session_state:   
     st.session_state["results_df"] = None   
@@ -113,31 +112,43 @@ def parse_vina_output(stdout_text: str):
    
    
 def run_vina(protein_path, ligand_path, center, size, exhaustiveness, out_pdbqt):   
-    # 彻底移除了“若 Vina 不存在则返回模拟数据”的逻辑。此处如缺失直接产生错误。
-    if not check_tool("vina"):   
-        st.error("❌ 环境缺失：未检测到环境中的 `vina` 可执行程序！请配置 packages.txt 底层编译或确保系统 PATH 已经加入 Vina。")
-        return None, "Error: 'vina' CLI tool not found in PATH."
-    cmd = [   
-        "vina",   
-        "--receptor", protein_path,   
-        "--ligand", ligand_path,   
-        "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),   
-        "--size_x", str(size[0]), "--size_y", str(size[1]), "--size_z", str(size[2]),   
-        "--exhaustiveness", str(exhaustiveness),   
-        "--out", out_pdbqt   
-    ]   
-    try:   
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)   
-        out = proc.stdout + "\n" + proc.stderr   
-        if proc.returncode != 0:   
+    # 优先尝试利用 Python API 接口运行对接以避免命令行 PATH 权限或缺失问题  
+    try:
+        from vina import Vina
+        v = Vina(sf_name='vina', cpu=1)
+        v.set_receptor(protein_path)
+        v.set_ligand_from_file(ligand_path)
+        v.compute_vina_maps(center=list(center), box_size=list(size))
+        v.dock(exhaustiveness=exhaustiveness, n_poses=1)
+        v.write_poses(out_pdbqt, n_poses=1, overwrite=True)
+        energies = v.energies(n_poses=1)
+        score = round(float(energies[0][0]), 2)
+        return score, "Success via Python API"
+    except ImportError:
+        # 如果未引入 python-vina 依赖，则后备退回到命令行 subprocess 执行逻辑
+        if not check_tool("vina"):   
+            return None, "Error: 未在系统中检测到 'vina' 命令行程序，同时 Python 环境中也未检测到 'vina' 包。"  
+        
+        cmd = [   
+            "vina",   
+            "--receptor", protein_path,   
+            "--ligand", ligand_path,   
+            "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),   
+            "--size_x", str(size[0]), "--size_y", str(size[1]), "--size_z", str(size[2]),   
+            "--exhaustiveness", str(exhaustiveness),   
+            "--out", out_pdbqt   
+        ]   
+        try:   
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)   
+            out = proc.stdout + "\n" + proc.stderr   
             score = parse_vina_output(out)   
             return score, out   
-        score = parse_vina_output(out)   
-        return score, out   
-    except subprocess.TimeoutExpired:   
-        return None, "Vina 对接耗时超限（10分钟超时中断）"   
-    except Exception as e:   
-        return None, f"对接执行异常: {str(e)}"   
+        except subprocess.TimeoutExpired:   
+            return None, "Vina 对接耗时超限（10分钟超时中断）"   
+        except Exception as e:   
+            return None, f"对接执行异常: {str(e)}"   
+    except Exception as e:
+        return None, f"Python Vina API 执行发生故障: {str(e)}"
    
    
 def pdbqt_to_pdb(pdbqt_file, pdb_file):   
@@ -156,40 +167,40 @@ def pdbqt_to_pdb(pdbqt_file, pdb_file):
         return False   
    
    
-def show_structure(protein_path, ligand_path):  
-    # 诊断性提示：确保我们知道到底读到了什么  
-    if not os.path.exists(protein_path):  
-        st.error(f"严重错误：受体文件不存在 {protein_path}")  
-        return  
-    if not os.path.exists(ligand_path):  
-        st.error(f"严重错误：配体文件不存在 {ligand_path}")  
-        return  
-          
-    try:  
-        with open(protein_path, "r") as f: p_data = f.read()  
-        with open(ligand_path, "r") as f: l_data = f.read()  
-          
-        # 如果文件为空  
-        if not p_data.strip(): st.error("错误：受体文件内容为空")  
-        if not l_data.strip(): st.error("错误：配体文件内容为空")  
-  
-  
-        view = py3Dmol.view(width=850, height=520)  
-        view.addModel(p_data, "pdb")  
-        view.setStyle({"model": 0}, {"cartoon": {"color": "#64748b"}})  
-        view.addModel(l_data, "pdb")  
-        view.setStyle({"model": 1}, {"stick": {"colorscheme": "cyanCarbon"}})  
-        view.zoomTo()  
-          
-        # 修改：移除了 html 渲染中的 key 参数参数，彻底修复旧版 Streamlit Iframe 命名冲突报错
-        view_html = view._make_html()   
-        st.components.v1.html(view_html, height=520)  
-  
-  
-          
-    except Exception as e:   
-        st.error(f"3D 渲染渲染流程捕获异常：{e}")  
-        st.exception(e) # 打印详细的堆栈跟踪  
+def show_structure(protein_path, ligand_path):    
+    # 诊断性提示：确保我们知道到底读到了什么    
+    if not os.path.exists(protein_path):    
+        st.error(f"严重错误：受体文件不存在 {protein_path}")    
+        return    
+    if not os.path.exists(ligand_path):    
+        st.error(f"严重错误：配体文件不存在 {ligand_path}")    
+        return    
+             
+    try:    
+        with open(protein_path, "r") as f: p_data = f.read()    
+        with open(ligand_path, "r") as f: l_data = f.read()    
+             
+        # 如果文件为空    
+        if not p_data.strip(): st.error("错误：受体文件内容为空")    
+        if not l_data.strip(): st.error("错误：配体文件内容为空")    
+      
+      
+        view = py3Dmol.view(width=850, height=520)    
+        view.addModel(p_data, "pdb")    
+        view.setStyle({"model": 0}, {"cartoon": {"color": "#64748b"}})    
+        view.addModel(l_data, "pdb")    
+        view.setStyle({"model": 1}, {"stick": {"colorscheme": "cyanCarbon"}})    
+        view.zoomTo()    
+             
+        # 修改：移除了 html 渲染中的 key 参数，彻底修复旧版 Streamlit Iframe 命名冲突报错  
+        view_html = view._make_html()     
+        st.components.v1.html(view_html, height=520)    
+      
+      
+             
+    except Exception as e:     
+        st.error(f"3D 渲染渲染流程捕获异常：{e}")    
+        st.exception(e) # 打印详细的堆栈跟踪    
    
    
 col_ctrl, col_view = st.columns([0.38, 0.62])   
@@ -258,7 +269,12 @@ with col_view:
             if st.button("检测环境 (Vina / OpenBabel)"):   
                 ava_vina = check_tool("vina")   
                 ava_ob = check_tool("obabel")   
-                st.info(f"Vina 可用: {ava_vina}，OpenBabel 可用: {ava_ob}")   
+                try:
+                    from vina import Vina
+                    api_vina = True
+                except ImportError:
+                    api_vina = False
+                st.info(f"Vina 命令行可用: {ava_vina} | Vina Python API 支持: {api_vina} | OpenBabel 可用: {ava_ob}")   
    
    
     if btn_start:   
@@ -317,19 +333,19 @@ with col_view:
                     lig_basename = os.path.splitext(os.path.basename(lig_path))[0]   
                     out_pdbqt = os.path.join(workdir, f"out_{lig_basename}.pdbqt")   
                     t0 = time.time()   
-                    # 运行真实对接计算
+                    # 运行真实对接计算  
                     score, raw = run_vina(prot_pdbqt, lig_path, (cx, cy, cz), (sx, sy, sz), v_exh, out_pdbqt)   
                     t1 = time.time()   
-                    
-                    # 修改：真实对接模式下，若计算未取得合理得分，记录报错且直接跳过，不再给予随机分数！
-                    if score is None:
-                        st.error(f"❌ 运行故障：小分子 '{lig_basename}' 对接未能生成亲和得分。报错原因：\n{raw}")
-                        continue
+                      
+                    # 真实对接模式下，若计算未取得合理得分，记录报错且直接跳过，不再给予随机分数！  
+                    if score is None:  
+                        st.error(f"❌ 运行故障：小分子 '{lig_basename}' 对接未能生成亲和得分。报错原因：\n{raw}")  
+                        continue  
                         
-                    # 转换结构以进行可视化展示
+                    # 转换结构以进行可视化展示  
                     out_pdb = os.path.join(workdir, f"{lig_basename}.pdb")   
                     ok = pdbqt_to_pdb(out_pdbqt if os.path.exists(out_pdbqt) else lig_path, out_pdb)   
-                    
+                      
                     calc_matrix.append({   
                         "化合物名称": lig_basename,   
                         "结合亲和力 (kcal/mol)": score,   
@@ -337,14 +353,14 @@ with col_view:
                     })   
                     progress.progress((idx + 1)/total)   
                     st.write(f"已完成 {idx+1}/{total}：{lig_basename}，得分 {score}，耗时 {t1-t0:.1f}s")   
-                
-                # 只有当成功计算非空时渲染表格
-                if calc_matrix:
+                  
+                # 只有当成功计算非空时渲染表格  
+                if calc_matrix:  
                     df_results = pd.DataFrame(calc_matrix).sort_values("结合亲和力 (kcal/mol)", ascending=True).reset_index(drop=True)   
                     st.session_state["results_df"] = df_results   
                     st.success("对接任务运行完毕，结果已缓存于会话。")   
-                else:
-                    st.error("真实计算未能成功完成。请在上方错误日志中检查对接配置或软件状态。")
+                else:  
+                    st.error("真实计算未能成功完成。请在上方错误日志中检查对接配置或软件状态。")  
    
    
     # results rendering   
@@ -399,6 +415,7 @@ with col_view:
                             zf.write(p, arcname=os.path.basename(p))   
                 with open(zip_path, "rb") as fr:   
                     st.download_button("下载 PDB ZIP", fr.read(), file_name="docking_pdbs.zip", mime="application/zip", use_container_width=True)   
+   
    
     else:   
         st.info("提示：尚无对接结果。请先在左侧上传受体与配体并启动计算。")
