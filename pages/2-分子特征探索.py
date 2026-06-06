@@ -1,32 +1,37 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
-import plotly.express as px
-from rdkit import Chem
-from rdkit.Chem import Descriptors, Lipinski
+import seaborn as sns
+import io
+import sys
 
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'sans-serif']
-plt.rcParams['axes.unicode_minus'] = False
+# 解决特定环境下可能导致的输出流编码问题
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-st.set_page_config(page_title="分子性质探索", layout="wide")
+# 字体配置，多系统兼容方案（特别针对 Linux 部署环境加入了 WenQuanYi）
+def set_matplot_zh_font():
+    plt.rcParams['font.sans-serif'] = [
+        'SimHei',             # Windows 黑体
+        'Microsoft YaHei',    # Windows 微软雅黑
+        'Heiti TC',           # macOS 繁体黑体
+        'Arial Unicode MS',   # macOS 兼容中文
+        'WenQuanYi Micro Hei',# Linux 下的开源中文字体
+        'DejaVu Sans',        # 备用英文
+        'sans-serif'
+    ]
+    plt.rcParams['axes.unicode_minus'] = False # 正常显示负号
 
+set_matplot_zh_font()
+
+st.set_page_config(page_title="分子特征探索", layout="wide")
+
+# 统一的 CSS 注入，并将 st.container(border=True) 样式与前序页面的 card 设计完美融合
 st.markdown("""
 <style>
     .main { background-color: #f8fafc; }
-    [data-testid="stSidebar"] { background-color: #0f172a !important; }
-    [data-testid="stSidebar"] * { color: #cbd5e1 !important; }
-    [data-testid="sidebar-nav-container"] { padding-top: 1.5rem !important; }
-    [data-testid="sidebar-nav-item"] {
-        padding-top: 16px !important;
-        padding-bottom: 16px !important;
-        margin-top: 12px !important;
-        margin-bottom: 12px !important;
-        border-radius: 8px !important;
-        font-size: 15px !important;
-    }
-    [data-testid="sidebar-nav-item-active"] { background-color: #1e3a8a !important; font-weight: 700 !important; }
     .blue-banner {
         background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
         color: #ffffff;
@@ -36,154 +41,207 @@ st.markdown("""
     }
     .blue-banner h1 { color: #ffffff !important; margin: 0 0 8px 0 !important; font-size: 28px; }
     .blue-banner p { color: #cbd5e1 !important; margin: 0 !important; font-size: 14px; }
-    .card {
-        background-color: #ffffff;
-        padding: 24px;
-        border-radius: 12px;
-        border: 1px solid #e2e8f0;
-        margin-bottom: 20px;
-    }
-    .report-card {
-        background-color: #ffffff;
-        border-left: 4px solid #1e3a8a;
-        padding: 20px;
+    
+    /* 统一的区块标题风格 */
+    .section-header {
+        background-color: #f1f5f9;
+        padding: 10px 16px;
         border-radius: 8px;
-        border: 1px solid #e2e8f0;
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 16px;
+        margin-bottom: 12px;
+        margin-top: 18px;
+        border-left: 5px solid #1e3a8a;
+    }
+    
+    /* 强制重置 Streamlit 原生 border 容器的边框和内边距，统一风格 */
+    div[data-testid="stVerticalBlockBorderLine"] {
+        background-color: #ffffff !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05) !important;
+        margin-bottom: 20px !important;
+    }
+    .stButton>button {
+        background-color: #1e3a8a !important;
+        color: white !important;
+        border-radius: 8px !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="blue-banner">
-    <h1>分子性质空间分布与相关性分析</h1>
-    <p>考察物理化学常用常数的多维分布特征，核验特征是否存在过度相关的冗余线性依赖。</p>
+    <h1>分子物理化学特征探索</h1>
+    <p>分析分子属性的分布状态与多维共线性，快速诊断并过滤信息过载变量，辅助构建高质量的 QSAR 特征矩阵。</p>
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.subheader("数据源选择")
-data_source = st.radio("选择进入分析计算的数据路径：", ["读取前序过滤页面缓存结果", "在本地上传全新 CSV 表格"])
-df = None
-if data_source == "读取前序过滤页面缓存结果":
-    if "cleaned_df" in st.session_state:
-        df = st.session_state["cleaned_df"]
-        st.success("读取成功：已接入过滤清洗后的系统缓存表。")
-    else:
-        st.error("系统没有检测到清洗数据缓存。请先进行第一步清洗过滤，或者在上方修改为上传本地 CSV。")
-else:
-    f_up = st.file_uploader("导入自定义分子属性 CSV 文件", type=["csv"])
-    if f_up:
-        df = pd.read_csv(f_up)
-st.markdown('</div>', unsafe_allow_html=True)
+# ==========================================
+# 布局 1：数据源选择（与前序缓存共享）
+# ==========================================
+st.markdown('<div class="section-header">数据源配置</div>', unsafe_allow_html=True)
 
-if df is not None:
-    ch_map = {
-        "MW": "分子量 (MW)",
-        "LogP": "脂水分配常数 (LogP)",
-        "TPSA": "极性拓扑表面积 (TPSA)",
-        "HBD": "氢键供体数 (HBD)",
-        "HBA": "氢键受体数 (HBA)",
-        "RotatableBonds": "可旋转单键数 (RB)"
-    }
+with st.container(border=True):
+    col_ctrl, col_info = st.columns([0.45, 0.55])
     
-    needed_cols = list(ch_map.keys())
-    missing_cols = [c for c in needed_cols if c not in df.columns]
-    
-    if missing_cols and "smiles" in df.columns:
-        with st.spinner("缺失指定物理特征列，正在通过 RDKit 自动提取..."):
-            mws, logps, tpsas, hbds, hbas, rbs = [], [], [], [], [], []
-            for s in df["smiles"]:
-                try:
-                    m = Chem.MolFromSmiles(s)
-                    if m:
-                        mws.append(Descriptors.MolWt(m))
-                        logps.append(Descriptors.MolLogP(m))
-                        tpsas.append(Descriptors.TPSA(m))
-                        hbds.append(Lipinski.NumHDonors(m))
-                        hbas.append(Lipinski.NumHAcceptors(m))
-                        rbs.append(Lipinski.NumRotatableBonds(m))
-                    else:
-                        mws.append(np.nan); logps.append(np.nan); tpsas.append(np.nan)
-                        hbds.append(np.nan); hbas.append(np.nan); rbs.append(np.nan)
-                except:
-                    mws.append(np.nan); logps.append(np.nan); tpsas.append(np.nan)
-                    hbds.append(np.nan); hbas.append(np.nan); rbs.append(np.nan)
-            df["MW"] = mws
-            df["LogP"] = logps
-            df["TPSA"] = tpsas
-            df["HBD"] = hbds
-            df["HBA"] = hbas
-            df["RotatableBonds"] = rbs
-            df = df.dropna().reset_index(drop=True)
-            st.session_state["cleaned_df"] = df
-
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("分析自变量选择")
-    selected = st.multiselect("请选取需要考察的物理常数维度：", needed_cols, default=["MW", "LogP", "TPSA"])
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if len(selected) >= 2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("物理属性分布直方图")
-        for i in range(0, len(selected), 2):
-            cols = st.columns(2)
-            for idx, feature in enumerate(selected[i:i+2]):
-                with cols[idx]:
-                    fig = px.histogram(
-                        df, x=feature, template="simple_white",
-                        color_discrete_sequence=["#1e3a8a"],
-                        labels={feature: ch_map[feature]},
-                        title=f"{ch_map[feature]} 分布频率"
-                    )
-                    fig.update_layout(height=280, margin=dict(l=20, r=20, t=35, b=20))
-                    st.plotly_chart(fig, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("特征自相关分析与评价")
+    with col_ctrl:
+        data_source = st.radio(
+            "数据读取模式：",
+            ["使用前序质控清洗的文件缓存", "手动上传新的本地 CSV 数据表"],
+            horizontal=True
+        )
         
-        col_heat, col_diag = st.columns([0.5, 0.5])
-        corr_mat = df[selected].corr()
-        
-        with col_heat:
-            fig_corr, ax_corr = plt.subplots(figsize=(5, 3.8))
-            sns.heatmap(corr_mat, annot=True, cmap="Blues", fmt=".2f", ax=ax_corr, square=True, linewidths=.5)
-            labels_zh = [ch_map[x] for x in selected]
-            ax_corr.set_xticklabels(labels_zh, rotation=30, ha="right", fontsize=9)
-            ax_corr.set_yticklabels(labels_zh, rotation=0, fontsize=9)
-            ax_corr.set_title("物理参数 Pearson 相关系数矩阵", fontsize=10)
-            st.pyplot(fig_corr)
-            
-        with col_diag:
-            co_errors = []
-            for i in range(len(corr_mat.columns)):
-                for j in range(i):
-                    val = corr_mat.iloc[i, j]
-                    if abs(val) > 0.75:
-                        co_errors.append((corr_mat.columns[i], corr_mat.columns[j], val))
-            
-            diagnostic_msg = ""
-            if co_errors:
-                diagnostic_msg += "<strong>警报：当前自变量分析发现高度强共线性问题：</strong><br>"
-                for f1, f2, val in co_errors:
-                    diagnostic_msg += f"- 参数对 [<strong>{ch_map[f1]}</strong>] 与 [<strong>{ch_map[f2]}</strong>] 的共线性关联度极高 ({val:.2f})。<br>"
-                diagnostic_msg += """
-                <br><em>结构优化改进提示：</em><br>
-                上述自变量彼此冗余可能会过度干扰回归分析拟合权重，引致泛化能力变差。推荐在实施 QSAR 回归预测建模前，剔除两者中的其中一维度性。
-                """
+    with col_info:
+        df_explore = None
+        if data_source == "使用前序质控清洗的文件缓存":
+            if "cleaned_df" in st.session_state:
+                df_explore = st.session_state["cleaned_df"]
+                st.success("✅ 成功关联前序模块清洗后的物理分子缓存数据。")
             else:
-                diagnostic_msg = """
-                <strong>系统互斥分析达标：</strong><br>
-                所有选定维度的 Pearson 相关系数全部处于安全水平（绝对值 <strong>&lt; 0.75</strong>）。数据内部多维差异度良好，不会产生多重参数冗余危险。
-                """
-            st.markdown(f"""
-            <div class="report-card" style="height: 100%;">
-                <h4 style="margin-top:0px; color:#1e3a8a !important;">共线性与冗余特征诊断结论</h4>
-                <p style="color:#475569; font-size:13px; line-height:1.6; margin:0;">
-                    {diagnostic_msg}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+                st.error("❌ 暂无可用的分子缓存。请先前往第一页执行数据清洗质控，或选择手动上传本地 CSV 文件。")
+        else:
+            file = st.file_uploader("导入待分析物理常数的 CSV 数据集：", type=["csv"])
+            if file:
+                df_explore = pd.read_csv(file)
+                st.success("✅ 手动导入分子数据成功。")
+
+# ==========================================
+# 布局 2：分析核心展示（仅当数据源就绪后进入）
+# ==========================================
+if df_explore is not None:
+    # 提取表中所有的数值列
+    num_cols = df_explore.select_dtypes(include=[np.number]).columns.tolist()
+    # 剔除可能存在的标识型无用列
+    num_cols = [c for c in num_cols if c not in ["label", "UID", "id", "Unnamed: 0"]]
+    
+    if len(num_cols) == 0:
+        st.error("数据校验未通过：未在数据表内扫描出任何数值型物理性质特征字段。")
     else:
-        st.warning("提示：请在上方自变量列表中至少勾选两项物理特征。")
+        # 2.1 配置分析描述符与冗余度自检测
+        st.markdown('<div class="section-header">分析描述符配置与特征冗余诊断</div>', unsafe_allow_html=True)
+        
+        with st.container(border=True):
+            col_sel, col_diag = st.columns([0.45, 0.55])
+            
+            with col_sel:
+                st.markdown("**选择待考察的自变量描述符**")
+                # 设置默认选项以避免初始空白
+                default_picks = [c for c in ["MW", "LogP", "TPSA", "HBD", "HBA", "RotatableBonds"] if c in num_cols]
+                if not default_picks:
+                    default_picks = num_cols[:min(3, len(num_cols))]
+                    
+                selected_cols = st.multiselect(
+                    "请从表格解析出来的字段中，选定需要参与诊断的物性字段：",
+                    options=num_cols,
+                    default=default_picks
+                )
+                
+            with col_diag:
+                st.markdown("**相关性共线性检测报告**")
+                if len(selected_cols) > 1:
+                    # 计算特征相关系数矩阵
+                    corr_matrix = df_explore[selected_cols].corr().abs()
+                    redundant_pairs = []
+                    
+                    for i in range(len(corr_matrix.columns)):
+                        for j in range(i + 1, len(corr_matrix.columns)):
+                            if corr_matrix.iloc[i, j] > 0.75:
+                                redundant_pairs.append(
+                                    (corr_matrix.columns[i], corr_matrix.columns[j], corr_matrix.iloc[i, j])
+                                )
+                    
+                    if redundant_pairs:
+                        warning_html = "<ul style='margin:0; padding-left:20px; font-size:13px; color:#9a3412;'>"
+                        for pair in redundant_pairs:
+                            warning_html += f"<li>特征 <b>{pair[0]}</b> 与 <b>{pair[1]}</b> 相关度过高 (r = {pair[2]:.2f})</li>"
+                        warning_html += "</ul>"
+                        
+                        st.markdown(f"""
+                        <div style="background-color: #fffbeb; border-left: 4px solid #d97706; padding: 12px; border-radius: 6px; font-size: 13px; color: #b45309;">
+                            <strong>检测到高共线性冗余特征对：</strong><br>
+                            {warning_html}
+                            <span style="font-size:12px; color:#78350f; display:block; margin-top:8px;">💡 优化建议：共线性特征在机器学习模型训练中会导致权重分配异常，建议在训练分类器前只剔除并只保留高关联组中的其中一个。</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+                        <div style="background-color: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px; border-radius: 6px; font-size: 13px; color: #15803d;">
+                            <strong>系统性质自检通过：</strong><br>
+                            当前选定物理特征间的 Pearson 相关性绝对值全数保持在 0.75 以下。物理特征信息隔离良好，可以直接组合用于下游机器学习建模。
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("提示：请在左侧多选栏内至少选择 2 个物理描述符，方可激活相关性冗余检测分析。")
+
+        # 2.2 特征相关性 & 分布直方图
+        if len(selected_cols) > 0:
+            col_plot_l, col_plot_r = st.columns([0.45, 0.55])
+            
+            with col_plot_l:
+                st.markdown('<div class="section-header">特征间相关性系数热图</div>', unsafe_allow_html=True)
+                with st.container(border=True):
+                    if len(selected_cols) >= 2:
+                        fig_corr, ax_corr = plt.subplots(figsize=(5, 4.2))
+                        # 使用 seaborn 渲染干净典雅的蓝红热图
+                        sns.heatmap(
+                            df_explore[selected_cols].corr(),
+                            annot=True,
+                            cmap="RdBu_r",
+                            vmin=-1.0,
+                            vmax=1.0,
+                            fmt=".2f",
+                            annot_kws={"size": 9},
+                            ax=ax_corr
+                        )
+                        ax_corr.tick_params(axis='both', which='major', labelsize=9)
+                        ax_corr.set_title("Pearson Correlation Coefficients", fontsize=10, pad=10)
+                        plt.tight_layout()
+                        
+                        st.pyplot(fig_corr)
+                        plt.close(fig_corr)
+                    else:
+                        st.info("相关性热图绘制需要您在配置项中至少挑选 2 个特征。")
+                        
+            with col_plot_r:
+                st.markdown('<div class="section-header">物理属性直方分布图</div>', unsafe_allow_html=True)
+                with st.container(border=True):
+                    # 分网格布局平铺直方图，避免图表大小不对称
+                    num_plots = len(selected_cols)
+                    rows = int(np.ceil(num_plots / 2))
+                    cols = 2 if num_plots > 1 else 1
+                    
+                    fig_dist, axes = plt.subplots(rows, cols, figsize=(7.5, 2.1 * rows))
+                    
+                    # 强行打平成一维数组，方便循环遍历配置
+                    if num_plots == 1:
+                        axes = np.array([axes])
+                    else:
+                        axes = axes.flatten()
+                        
+                    for idx, property_name in enumerate(selected_cols):
+                        sns.histplot(
+                            df_explore[property_name].dropna(),
+                            kde=True,
+                            color="#1e3a8a",
+                            ax=axes[idx],
+                            bins=15
+                        )
+                        axes[idx].set_xlabel(property_name, fontsize=8)
+                        axes[idx].set_ylabel("频数", fontsize=8)
+                        axes[idx].tick_params(labelsize=8)
+                        axes[idx].spines['top'].set_visible(False)
+                        axes[idx].spines['right'].set_visible(False)
+                        axes[idx].set_title(f"{property_name} Density", fontsize=9)
+                        
+                    # 如果选择的描述符个数在网格中留空，删除不需要的子图区域
+                    for empty_idx in range(num_plots, len(axes)):
+                        fig_dist.delaxes(axes[empty_idx])
+                        
+                    plt.tight_layout()
+                    st.pyplot(fig_dist)
+                    plt.close(fig_dist)
+        else:
+            st.warning("暂无任何特征进入评估，请通过上方的配置栏向清单中添加对应的物理自变量特征。")
