@@ -191,7 +191,7 @@ def show_structure(protein_path, ligand_path):
         
         # 使用 st.components.v1.html 渲染，如果还是空的，尝试在控制台报错
         view_html = view._make_html()
-        st.components.v1.html(view_html, height=520)
+        st.components.v1.html(view_html, height=520, key=f"py3dmol_{target_sm}")
         
     except Exception as e: 
         st.error(f"3D 渲染渲染流程捕获异常：{e}")
