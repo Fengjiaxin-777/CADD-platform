@@ -1,20 +1,20 @@
-# -*- coding: utf-8 -*-  
-import streamlit as st  
-import subprocess  
-import py3Dmol  
-import pandas as pd  
-import os  
-import shutil  
-import tempfile  
-import time  
-from pathlib import Path  
-import zipfile  
-  
-  
-st.set_page_config(page_title="分子三维物理对接", layout="wide")  
-  
-  
-# CSS 样式定义
+# -*- coding: utf-8 -*-   
+import streamlit as st   
+import subprocess   
+import py3Dmol   
+import pandas as pd   
+import os   
+import shutil   
+import tempfile   
+import time   
+from pathlib import Path   
+import zipfile   
+   
+   
+st.set_page_config(page_title="分子三维物理对接", layout="wide")   
+   
+   
+# CSS 样式定义  
 st.markdown("""   
 <style>   
     .main { background-color: #f8fafc; }   
@@ -50,17 +50,17 @@ st.markdown("""
     }   
 </style>   
 """, unsafe_allow_html=True)   
-  
-  
+   
+   
 st.markdown("""   
 <div class="blue-banner">   
     <h1>三维配体受体物理对接</h1>   
     <p>预测小分子在目标蛋白质活性口袋中的非共价键合姿态，解算对接结合亲和自由能并定位关键相互作用。</p>   
 </div>   
 """, unsafe_allow_html=True)   
-  
-  
-# 初始化 session
+   
+   
+# 初始化 session  
 if "results_df" not in st.session_state:   
     st.session_state["results_df"] = None   
 if "protein_pdb" not in st.session_state:   
@@ -68,32 +68,34 @@ if "protein_pdb" not in st.session_state:
 if "workdir" not in st.session_state:   
     st.session_state["workdir"] = os.path.join(tempfile.gettempdir(), f"streamlit_docking_{int(time.time())}")   
     os.makedirs(st.session_state["workdir"], exist_ok=True)   
-   
-   
+    
+    
 workdir = st.session_state["workdir"]   
-   
-   
+    
+    
 def safe_filename(name: str) -> str:   
     name = str(name).strip()   
     name = "".join(c for c in name if c.isalnum() or c in ("_", "-", "."))   
     if not name:   
         name = f"mol_{int(time.time())}"   
     return name   
-   
-   
+    
+# --- 性能优化：使用 @st.cache_resource 缓存系统工具检测 ---
+@st.cache_resource
 def check_tool(name: str) -> bool:   
     return shutil.which(name) is not None   
-
-# 内存中针对配体文件做前置严格合规校验
-def validate_pdbqt_format(file_content_bytes: bytes) -> bool:
-    try:
-        content_str = file_content_bytes.decode("utf-8", errors="ignore")
-        # AutoDock Vina 要求配体 PDBQT 中必须包含 ROOT 的开始标记作为分子扭转树根
-        return "ROOT" in content_str
-    except Exception:
-        return False
-   
-   
+  
+  
+# 内存中针对配体文件做前置严格合规校验  
+def validate_pdbqt_format(file_content_bytes: bytes) -> bool:  
+    try:  
+        content_str = file_content_bytes.decode("utf-8", errors="ignore")  
+        # AutoDock Vina 要求配体 PDBQT 中必须包含 ROOT 的开始标记作为分子扭转树根  
+        return "ROOT" in content_str  
+    except Exception:  
+        return False  
+    
+    
 def parse_vina_output(stdout_text: str):   
     score = None   
     lines = stdout_text.splitlines()   
@@ -114,23 +116,23 @@ def parse_vina_output(stdout_text: str):
             except:   
                 continue   
     return score   
-   
-   
+    
+    
 def run_vina(protein_path, ligand_path, center, size, exhaustiveness, out_pdbqt):   
-    # 优先尝试利用 Python API 接口运行对接
-    try:
-        from vina import Vina
-        v = Vina(sf_name='vina', cpu=1)
-        v.set_receptor(protein_path)
-        v.set_ligand_from_file(ligand_path)
-        v.compute_vina_maps(center=list(center), box_size=list(size))
-        v.dock(exhaustiveness=exhaustiveness, n_poses=1)
-        v.write_poses(out_pdbqt, n_poses=1, overwrite=True)
-        energies = v.energies(n_poses=1)
-        score = round(float(energies[0][0]), 2)
-        return score, "Success via Python API"
-    except ImportError:
-        # 如果未引入 python-vina 依赖，则后备退回到命令行执行
+    # 优先尝试利用 Python API 接口运行对接  
+    try:  
+        from vina import Vina  
+        v = Vina(sf_name='vina', cpu=1)  
+        v.set_receptor(protein_path)  
+        v.set_ligand_from_file(ligand_path)  
+        v.compute_vina_maps(center=list(center), box_size=list(size))  
+        v.dock(exhaustiveness=exhaustiveness, n_poses=1)  
+        v.write_poses(out_pdbqt, n_poses=1, overwrite=True)  
+        energies = v.energies(n_poses=1)  
+        score = round(float(energies[0][0]), 2)  
+        return score, "Success via Python API"  
+    except ImportError:  
+        # 如果未引入 python-vina 依赖，则后备退回到命令行执行  
         if not check_tool("vina"):   
             return None, "Error: 未在系统中检测到 'vina' 命令行程序，同时 Python 环境中也未检测到 'vina' 包。"  
         
@@ -152,10 +154,10 @@ def run_vina(protein_path, ligand_path, center, size, exhaustiveness, out_pdbqt)
             return None, "Vina 对接耗时超限（10分钟超时中断）"   
         except Exception as e:   
             return None, f"对接执行异常: {str(e)}"   
-    except Exception as e:
-        return None, f"Python Vina API 执行发生故障: {str(e)}"
-   
-   
+    except Exception as e:  
+        return None, f"Python Vina API 执行发生故障: {str(e)}"  
+    
+    
 def pdbqt_to_pdb(pdbqt_file, pdb_file):   
     if check_tool("obabel"):   
         try:   
@@ -168,8 +170,8 @@ def pdbqt_to_pdb(pdbqt_file, pdb_file):
         return True   
     except Exception:   
         return False   
-   
-   
+    
+    
 def show_structure(protein_path, ligand_path):    
     if not os.path.exists(protein_path):    
         st.error(f"严重错误：受体文件不存在 {protein_path}")    
@@ -198,44 +200,44 @@ def show_structure(protein_path, ligand_path):
     except Exception as e:     
         st.error(f"3D 渲染渲染流程捕获异常：{e}")    
         st.exception(e)   
-   
-   
+    
+    
 col_ctrl, col_view = st.columns([0.38, 0.62])   
-   
-   
+    
+    
 with col_ctrl:   
     with st.container(border=True):   
         st.subheader("对接任务设置")   
         
-        # --- 标注数据规范说明栏 ---
-        st.markdown("""
-        <div style="background-color: #fef3c7; border-left: 4px solid #d97706; padding: 12px; border-radius: 6px; font-size: 13px; color: #78350f; margin-bottom:15px; line-height:1.5;">
-            <strong>📁 上传文件格式规范说明：</strong><br><br>
-            <strong>1. 受体文件 (.pdbqt 或 .pdb)：</strong><br>
-            • 普通大分子多肽三维结构物理坐标文件。<br>
-            <strong>2. 配体小分子 (.pdbqt)：</strong><br>
-            • ⚠️ <strong>必须包含扭转树定义</strong>：内容中必须有 <code>ROOT</code> 和 <code>ENDROOT</code> 标记。<br>
-            • ⚠️ <strong>必须包含力场电荷</strong>：第 71-72 列需要有分配好的部分原子电荷，最后一列标识 AD4 原子类型。<br>
-            • <strong>严禁直接重命名后缀</strong>：将普通的 <code>.pdb</code> 直接改后缀为 <code>.pdbqt</code> 会因格式不合规导致计算引擎崩溃。
-        </div>
-        """, unsafe_allow_html=True)
+        # --- 标注数据规范说明栏 ---  
+        st.markdown("""  
+        <div style="background-color: #fef3c7; border-left: 4px solid #d97706; padding: 12px; border-radius: 6px; font-size: 13px; color: #78350f; margin-bottom:15px; line-height:1.5;">  
+            <strong>📁 上传文件格式规范说明：</strong><br><br>  
+            <strong>1. 受体文件 (.pdbqt 或 .pdb)：</strong><br>  
+            • 普通大分子多肽三维结构物理坐标文件。<br>  
+            <strong>2. 配体小分子 (.pdbqt)：</strong><br>  
+            • ⚠️ <strong>必须包含扭转树定义</strong>：内容中必须有 <code>ROOT</code> 和 <code>ENDROOT</code> 标记。<br>  
+            • ⚠️ <strong>必须包含力场电荷</strong>：第 71-72 列需要有分配好的部分原子电荷，最后一列标识 AD4 原子类型。<br>  
+            • <strong>严禁直接重命名后缀</strong>：将普通的 <code>.pdb</code> 直接改后缀为 <code>.pdbqt</code> 会因格式不合规导致计算引擎崩溃。  
+        </div>  
+        """, unsafe_allow_html=True)  
         
-        st.markdown("---")
+        st.markdown("---")  
         run_mode = st.radio("请指定配体数量类型：", ["对接单个候选分子", "执行批量虚拟配体筛选"])   
-   
+    
         st.markdown("---")   
         f_prot = st.file_uploader("载入大分子受体蛋白质 (.pdbqt 或 .pdb)", type=["pdbqt", "pdb"])   
-   
+    
         if run_mode == "对接单个候选分子":   
             f_lig = st.file_uploader("载入要对接的配体小分子 (.pdbqt)", type=["pdbqt"])   
             f_ligs = None   
         else:   
             f_ligs = st.file_uploader("批量载入多个配体分子 (.pdbqt)", type=["pdbqt"], accept_multiple_files=True)   
             f_lig = None   
-   
+    
         st.markdown("---")   
         st.subheader("活性位点口袋网格划定 (Grid Box)")   
-   
+    
         c_x_c, c_y_c, c_z_c = st.columns(3)   
         with c_x_c:   
             cx = st.number_input("三轴中心 X 坐标", value=0.0, step=0.1)   
@@ -243,7 +245,7 @@ with col_ctrl:
             cy = st.number_input("三轴中心 Y 坐标", value=0.0, step=0.1)   
         with c_z_c:   
             cz = st.number_input("三轴中心 Z 坐标", value=0.0, step=0.1)   
-   
+    
         s_x_c, s_y_c, s_z_c = st.columns(3)   
         with s_x_c:   
             sx = st.number_input("边宽 X (Å)", value=20.0, step=0.5)   
@@ -251,11 +253,11 @@ with col_ctrl:
             sy = st.number_input("高度 Y (Å)", value=20.0, step=0.5)   
         with s_z_c:   
             sz = st.number_input("厚度 Z (Å)", value=20.0, step=0.5)   
-   
+    
         v_exh = st.slider("采样深度 (Exhaustiveness)", min_value=1, max_value=32, value=8)   
         btn_start = st.button("启动结合模拟计算", type="primary", use_container_width=True)   
-   
-   
+    
+    
 with col_view:   
     # workspace controls   
     with st.container(border=True):   
@@ -275,46 +277,46 @@ with col_view:
             if st.button("检测环境 (Vina / OpenBabel)"):   
                 ava_vina = check_tool("vina")   
                 ava_ob = check_tool("obabel")   
-                try:
-                    from vina import Vina
-                    api_vina = True
-                except ImportError:
-                    api_vina = False
+                try:  
+                    from vina import Vina  
+                    api_vina = True  
+                except ImportError:  
+                    api_vina = False  
                 st.info(f"Vina 命令行可用: {ava_vina} | Vina Python API 支持: {api_vina} | OpenBabel 可用: {ava_ob}")   
-   
-   
+    
+    
     if btn_start:   
         if not f_prot:   
             st.error("执行被禁：请上传靶点受体文件 (.pdbqt 或 .pdb)。")   
-        else:
-            # 读取配体制备列表并进行前置强力格式检测校验
-            lig_uploads = []
-            if run_mode == "对接单个候选分子":
-                if f_lig:
-                    lig_uploads.append(f_lig)
-            else:
-                if f_ligs:
-                    lig_uploads = list(f_ligs)
+        else:  
+            # 读取配体制备列表并进行前置强力格式检测校验  
+            lig_uploads = []  
+            if run_mode == "对接单个候选分子":  
+                if f_lig:  
+                    lig_uploads.append(f_lig)  
+            else:  
+                if f_ligs:  
+                    lig_uploads = list(f_ligs)  
             
-            # --- 前置拦截校验阻断 ---
-            format_error_list = []
-            for item in lig_uploads:
-                file_bytes = item.getvalue()
-                if not validate_pdbqt_format(file_bytes):
-                    format_error_list.append(item.name)
+            # --- 前置拦截校验阻断 ---  
+            format_error_list = []  
+            for item in lig_uploads:  
+                file_bytes = item.getvalue()  
+                if not validate_pdbqt_format(file_bytes):  
+                    format_error_list.append(item.name)  
             
-            if format_error_list:
-                st.error(f"❌ 启动中断：检测到以下配体文件不符合标准 PDBQT 格式要求：`{', '.join(format_error_list)}`")
-                st.markdown("""
-                **数据格式错误排查提示：**
-                1. 您的 `.pdbqt` 可能是直接修改原本 `.pdb` 后缀得到的，缺少分子对接必需的扭转树描述。
-                2. 必须包含由 AutoDock Tools 或是 OpenBabel 软件计算出的 `ROOT` 及 `ENDROOT` 定义。
+            if format_error_list:  
+                st.error(f"❌ 启动中断：检测到以下配体文件不符合标准 PDBQT 格式要求：`{', '.join(format_error_list)}`")  
+                st.markdown("""  
+                **数据格式错误排查提示：**  
+                1. 您的 `.pdbqt` 可能是直接修改原本 `.pdb` 后缀得到的，缺少分子对接必需的扭转树描述。  
+                2. 必须包含由 AutoDock Tools 或是 OpenBabel 软件计算出的 `ROOT` 及 `ENDROOT` 定义。  
                 
-                *请按照左侧标注的格式规范重新生成标准小分子文件后再试。*
-                """)
-                st.stop()
+                *请按照左侧标注的格式规范重新生成标准小分子文件后再试。*  
+                """)  
+                st.stop()  
             
-            # 保存受体文件
+            # 保存受体文件  
             prot_name = safe_filename(getattr(f_prot, "name", "protein.pdbqt"))   
             prot_path = os.path.join(workdir, prot_name)   
             with open(prot_path, "wb") as fw:   
@@ -326,9 +328,9 @@ with col_view:
                 shutil.copy(prot_path, prot_pdb)   
             else:   
                 pdbqt_to_pdb(prot_path, prot_pdb)   
-   
+    
             st.session_state["protein_pdb"] = prot_pdb   
-   
+    
             calc_matrix = []   
             lig_files = []   
             if run_mode == "对接单个候选分子":   
@@ -353,7 +355,7 @@ with col_view:
                             single.seek(0)
                             fw.write(single.read())   
                         lig_files.append(lp)   
-   
+    
             if lig_files:   
                 progress = st.progress(0.0)   
                 total = len(lig_files)   
@@ -389,15 +391,15 @@ with col_view:
                     st.success("对接任务运行完毕，结果已缓存于会话。")   
                 else:  
                     st.error("真实计算未能成功完成。请在上方错误日志中检查对接配置或软件状态。")  
-   
-   
+    
+    
     # results rendering   
     if st.session_state["results_df"] is not None:   
         with st.container(border=True):   
             st.subheader("对接热力学亲和能排行（越负越好）")   
             df_eval = st.session_state["results_df"]   
             st.dataframe(df_eval[["化合物名称", "结合亲和力 (kcal/mol)"]], use_container_width=True)   
-   
+    
             best_lig = df_eval.iloc[0]   
             st.markdown(f"""   
             <div class="report-card">   
@@ -410,24 +412,24 @@ with col_view:
                 </p>   
             </div>   
             """, unsafe_allow_html=True)   
-   
+    
         with st.container(border=True):   
             sel_lig_name = st.selectbox("选择要渲染展示的三维化合物：", df_eval["化合物名称"])   
             s_pdb = df_eval.loc[df_eval["化合物名称"] == sel_lig_name, "PDB"].values[0]   
-   
+    
             st.subheader("活性位点微观对接三维交互视图")   
             if st.session_state.get("protein_pdb") and os.path.exists(st.session_state["protein_pdb"]) and os.path.exists(s_pdb):   
                 show_structure(st.session_state["protein_pdb"], s_pdb)   
             else:   
                 st.warning("无法渲染：缺少 protein.pdb 或 ligand pdb 文件。请检查工作区是否存在对应文件。")   
-   
+    
         # allow download of results CSV and zipped pdbs   
         with st.container(border=True):   
             st.subheader("导出与打包")   
-   
+    
             csv_bytes = df_eval.to_csv(index=False).encode("utf-8-sig")   
             st.download_button("导出对接结果 (CSV)", csv_bytes, "docking_results.csv", mime="text/csv", use_container_width=True)   
-   
+    
             # create zip of pdb files on demand   
             if st.button("打包并下载所有 PDB 文件"):   
                 zip_path = os.path.join(workdir, "docking_pdbs.zip")   
@@ -437,6 +439,6 @@ with col_view:
                             zf.write(p, arcname=os.path.basename(p))   
                 with open(zip_path, "rb") as fr:   
                     st.download_button("下载 PDB ZIP", fr.read(), file_name="docking_pdbs.zip", mime="application/zip", use_container_width=True)   
-   
+    
     else:   
         st.info("提示：尚无对接结果。请先在左侧上传受体与配体并启动计算。")
