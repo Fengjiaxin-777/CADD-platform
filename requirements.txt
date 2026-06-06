@@ -8,3 +8,6 @@ rdkit
 scikit-learn
 joblib
 stmol
+py3Dmol
+# 注意：vina 有时难以编译，如果部署报错，请务必确认已在 packages.txt 包含了所需的 libboost-all-dev
+vina
