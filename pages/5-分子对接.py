@@ -80,7 +80,7 @@ def safe_filename(name: str) -> str:
         name = f"mol_{int(time.time())}"   
     return name   
     
-# --- 性能优化：使用 @st.cache_resource 缓存系统工具检测 ---
+    
 @st.cache_resource
 def check_tool(name: str) -> bool:   
     return shutil.which(name) is not None   
@@ -289,33 +289,6 @@ with col_view:
         if not f_prot:   
             st.error("执行被禁：请上传靶点受体文件 (.pdbqt 或 .pdb)。")   
         else:  
-            # 读取配体制备列表并进行前置强力格式检测校验  
-            lig_uploads = []  
-            if run_mode == "对接单个候选分子":  
-                if f_lig:  
-                    lig_uploads.append(f_lig)  
-            else:  
-                if f_ligs:  
-                    lig_uploads = list(f_ligs)  
-            
-            # --- 前置拦截校验阻断 ---  
-            format_error_list = []  
-            for item in lig_uploads:  
-                file_bytes = item.getvalue()  
-                if not validate_pdbqt_format(file_bytes):  
-                    format_error_list.append(item.name)  
-            
-            if format_error_list:  
-                st.error(f"❌ 启动中断：检测到以下配体文件不符合标准 PDBQT 格式要求：`{', '.join(format_error_list)}`")  
-                st.markdown("""  
-                **数据格式错误排查提示：**  
-                1. 您的 `.pdbqt` 可能是直接修改原本 `.pdb` 后缀得到的，缺少分子对接必需的扭转树描述。  
-                2. 必须包含由 AutoDock Tools 或是 OpenBabel 软件计算出的 `ROOT` 及 `ENDROOT` 定义。  
-                
-                *请按照左侧标注的格式规范重新生成标准小分子文件后再试。*  
-                """)  
-                st.stop()  
-            
             # 保存受体文件  
             prot_name = safe_filename(getattr(f_prot, "name", "protein.pdbqt"))   
             prot_path = os.path.join(workdir, prot_name)   
@@ -330,32 +303,84 @@ with col_view:
                 pdbqt_to_pdb(prot_path, prot_pdb)   
     
             st.session_state["protein_pdb"] = prot_pdb   
+   
+            # 统一写出配体文件至工作目录以便进行校验和可选的物理修复
+            lig_uploads = []  
+            if run_mode == "对接单个候选分子":  
+                if f_lig:  
+                    lig_uploads.append(f_lig)  
+            else:  
+                if f_ligs:  
+                    lig_uploads = list(f_ligs)  
+                    
+            if not lig_uploads:
+                st.error("执行被禁：未上传任何候选配体分子。")
+                st.stop()
+            
+            lig_files = []
+            for single in lig_uploads:
+                ln = safe_filename(os.path.splitext(single.name)[0])
+                lp = os.path.join(workdir, f"{ln}.pdbqt")
+                with open(lp, "wb") as fw:
+                    single.seek(0)
+                    fw.write(single.read())
+                lig_files.append(lp)
+            
+            # --- 前置校验与 OpenBabel 智能修复逻辑 ---  
+            format_error_list = []  
+            repaired_count = 0
+            
+            for lp in lig_files:  
+                with open(lp, "rb") as fr:  
+                    file_bytes = fr.read()  
+                    
+                if not validate_pdbqt_format(file_bytes):  
+                    # 尝试调用本地的 OpenBabel 软件为缺失结构的 PDBQT 强行建立扭转路径以解决阻断
+                    repaired = False
+                    if check_tool("obabel"):
+                        repaired_path = lp + ".repaired"
+                        # 尝试1：按 PDBQT 转 PDBQT 补全电荷和加氢扭转树
+                        subprocess.run(["obabel", "-ipdbqt", lp, "-opdbqt", "-O", repaired_path], capture_output=True)
+                        if os.path.exists(repaired_path):
+                            with open(repaired_path, "rb") as fr2:
+                                if validate_pdbqt_format(fr2.read()):
+                                    shutil.copy(repaired_path, lp)
+                                    repaired = True
+                                    repaired_count += 1
+                        
+                        # 尝试2：如果尝试1失败，可能是重命名而来的 standard PDB 文本，尝试将其作为 PDB 读入重新规范输出
+                        if not repaired:
+                            subprocess.run(["obabel", "-ipdb", lp, "-opdbqt", "-O", repaired_path], capture_output=True)
+                            if os.path.exists(repaired_path):
+                                with open(repaired_path, "rb") as fr2:
+                                    if validate_pdbqt_format(fr2.read()):
+                                        shutil.copy(repaired_path, lp)
+                                        repaired = True
+                                        repaired_count += 1
+                                        
+                        # 清理工作区的临时转换介质文件
+                        if os.path.exists(repaired_path):
+                            os.remove(repaired_path)
+                            
+                    if not repaired:
+                        format_error_list.append(os.path.basename(lp))  
+            
+            # 只有在 OpenBabel 也无法修复或不可用时，才弹出错误提示退出
+            if format_error_list:  
+                st.error(f"❌ 启动中断：检测到以下配体文件不符合标准 PDBQT 格式要求：`{', '.join(format_error_list)}`")  
+                st.markdown("""  
+                **数据格式错误排查提示：**  
+                1. 您的 `.pdbqt` 可能是直接修改原本 `.pdb` 后缀得到的，缺少分子对接必需的扭转树描述。  
+                2. 必须包含由 AutoDock Tools 或是 OpenBabel 软件计算出的 `ROOT` 及 `ENDROOT` 定义。  
+                
+                *请按照左侧标注的格式规范重新生成标准小分子文件后再试。*  
+                """)  
+                st.stop()  
+            
+            if repaired_count > 0:
+                st.warning(f"ℹ️ 提示：检测到有 {repaired_count} 个配体文件非标准描述。系统已自动调用后台 OpenBabel 工具重新为您转换/修复为可用于 Vina 的标准 PDBQT 结构。")
     
             calc_matrix = []   
-            lig_files = []   
-            if run_mode == "对接单个候选分子":   
-                if not f_lig:   
-                    st.error("执行被禁：请上传配体描述文件 (.pdbqt)。")   
-                else:   
-                    lig_name = safe_filename(os.path.splitext(f_lig.name)[0])   
-                    lig_pdbqt = os.path.join(workdir, f"{lig_name}.pdbqt")   
-                    with open(lig_pdbqt, "wb") as fw:   
-                        f_lig.seek(0)
-                        fw.write(f_lig.read())   
-                    lig_files = [lig_pdbqt]   
-            else:   
-                if not f_ligs:   
-                    st.error("执行被禁：批量模式下未上传任何配体。")   
-                else:   
-                    lig_files = []   
-                    for single in f_ligs:   
-                        ln = safe_filename(os.path.splitext(single.name)[0])   
-                        lp = os.path.join(workdir, f"{ln}.pdbqt")   
-                        with open(lp, "wb") as fw:   
-                            single.seek(0)
-                            fw.write(single.read())   
-                        lig_files.append(lp)   
-    
             if lig_files:   
                 progress = st.progress(0.0)   
                 total = len(lig_files)   
