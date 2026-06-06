@@ -14,7 +14,7 @@ import zipfile
 st.set_page_config(page_title="分子三维物理对接", layout="wide")  
   
   
-# CSS 样式定义，彻底移除了 .card DOM 类，通过原生 stVerticalBlockBorderLine 完成卡片立体风化美化  
+# CSS 样式定义，彻底移除了 .card DOM 类，通过原生 stVerticalBlockBorderLine 完成卡片立体化美化  
 st.markdown("""   
 <style>   
     .main { background-color: #f8fafc; }   
@@ -60,6 +60,21 @@ st.markdown("""
 """, unsafe_allow_html=True)   
   
   
+# ==============================================================================
+# 提供一段结构绝对标准、Vina 可顺利计算的标准小分子配体 PDBQT 示例文本数据（包含扭转树定义）
+# ==============================================================================
+SAMPLE_LIGAND_PDBQT = """REMARK  5 ACTIVE TORSIONS
+REMARK  Assigned autodock charges and atom types
+ROOT
+ATOM      1  C   LIG     1       0.757   0.141   0.000  1.00  0.00    +0.120 C 
+ATOM      2  O   LIG     1      -0.643   0.141   0.000  1.00  0.00    -0.340 OA
+ATOM      3  H   LIG     1       1.114   1.041   0.300  1.00  0.00    +0.060 HD
+ATOM      4  H   LIG     1       1.114  -0.759  -0.300  1.00  0.00    +0.060 HD
+ATOM      5  H   LIG     1      -1.000  -0.759   0.100  1.00  0.00    +0.100 HD
+ENDROOT
+TORSDOF 0
+"""
+
 # initialize session state keys   
 if "results_df" not in st.session_state:   
     st.session_state["results_df"] = None   
@@ -84,6 +99,15 @@ def safe_filename(name: str) -> str:
    
 def check_tool(name: str) -> bool:   
     return shutil.which(name) is not None   
+
+# 内存中针对配体文件做前置严格合规校验
+def validate_pdbqt_format(file_content_bytes: bytes) -> bool:
+    try:
+        content_str = file_content_bytes.decode("utf-8", errors="ignore")
+        # AutoDock Vina 要求配体 PDBQT 中必须包含 ROOT 的开始标记作为分子扭转树根
+        return "ROOT" in content_str
+    except Exception:
+        return False
    
    
 def parse_vina_output(stdout_text: str):   
@@ -177,8 +201,8 @@ def show_structure(protein_path, ligand_path):
         return    
              
     try:    
-        with open(protein_path, "r") as f: p_data = f.read()    
-        with open(ligand_path, "r") as f: l_data = f.read()    
+        with open(protein_path, "r", encoding="utf-8", errors="ignore") as f: p_data = f.read()    
+        with open(ligand_path, "r", encoding="utf-8", errors="ignore") as f: l_data = f.read()    
              
         # 如果文件为空    
         if not p_data.strip(): st.error("错误：受体文件内容为空")    
@@ -192,11 +216,9 @@ def show_structure(protein_path, ligand_path):
         view.setStyle({"model": 1}, {"stick": {"colorscheme": "cyanCarbon"}})    
         view.zoomTo()    
              
-        # 修改：移除了 html 渲染中的 key 参数，彻底修复旧版 Streamlit Iframe 命名冲突报错  
+        # 移除了 html 渲染中的 key 参数参数，彻底修复旧版 Streamlit Iframe 命名冲突报错  
         view_html = view._make_html()     
         st.components.v1.html(view_html, height=520)    
-      
-      
              
     except Exception as e:     
         st.error(f"3D 渲染渲染流程捕获异常：{e}")    
@@ -209,6 +231,25 @@ col_ctrl, col_view = st.columns([0.38, 0.62])
 with col_ctrl:   
     with st.container(border=True):   
         st.subheader("对接任务设置")   
+        
+        # --- 新增：强制性的数据格式要求规范及官方下载模块演示 ---
+        st.markdown("""
+        <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px; border-radius: 6px; font-size: 13px; color: #1e3a8a; margin-bottom:15px; line-height:1.5;">
+            <strong>📋 数据格式要求要求：</strong><br>
+            • 配体文件<strong>必须</strong>是通过 <code>AutoDockTools</code>, <code>OpenBabel</code> 或 <code>MGLTools</code> 加载处理、含有电荷和可扭转树架构的<strong>标准 PDBQT 格式</strong>。<br>
+            • 严禁粗暴强行更改 <code>.pdb</code> 后缀为 <code>.pdbqt</code>，以防计算报错。你可以下载下方经校验的标准正确数据做首次运行校验。
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.download_button(
+            label="💾 下载标准配体 PDBQT 示例数据",
+            data=SAMPLE_LIGAND_PDBQT,
+            file_name="standard_ligand_sample.pdbqt",
+            mime="text/plain",
+            use_container_width=True
+        )
+        
+        st.markdown("---")
         run_mode = st.radio("请指定配体数量类型：", ["对接单个候选分子", "执行批量虚拟配体筛选"])   
    
    
@@ -280,7 +321,37 @@ with col_view:
     if btn_start:   
         if not f_prot:   
             st.error("执行被禁：请上传靶点受体文件 (.pdbqt 或 .pdb)。")   
-        else:   
+        else:
+            # 读取配体制备列表并进行前置强力格式检测校验
+            lig_uploads = []
+            if run_mode == "对接单个候选分子":
+                if f_lig:
+                    lig_uploads.append(f_lig)
+            else:
+                if f_ligs:
+                    lig_uploads = list(f_ligs)
+            
+            # --- 核心拦截校验步骤 ---
+            format_error_list = []
+            for item in lig_uploads:
+                # 预读文件内容
+                file_bytes = item.getvalue()
+                if not validate_pdbqt_format(file_bytes):
+                    format_error_list.append(item.name)
+            
+            if format_error_list:
+                st.error(f"❌ 启动中断：检测到以下配体文件不符合标准 PDBQT 格式要求：`{', '.join(format_error_list)}`")
+                st.markdown("""
+                **主要原因分析：**
+                1. 您的 `.pdbqt` 可能是强行修改原本 `.pdb` / `.txt` 后缀得到的。
+                2. 缺少必要扭转树的 `ROOT` 结构标记和力场局部电荷，导致后台 Vina 引擎阻断异常。
+                
+                **自助排查建议：**
+                * 点击左下角 **“💾 下载标准配体 PDBQT 示例数据”** 下载标准文件对照修改。
+                * 使用系统检测支持的 `OpenBabel` 指令或 `AutoDock Tools` 软件导出转换。
+                """)
+                st.stop()  # 拦截后续的后端计算调用，强制用户修正
+            
             # save protein file into workdir   
             prot_name = safe_filename(getattr(f_prot, "name", "protein.pdbqt"))   
             prot_path = os.path.join(workdir, prot_name)   
@@ -311,6 +382,8 @@ with col_view:
                     lig_name = safe_filename(os.path.splitext(f_lig.name)[0])   
                     lig_pdbqt = os.path.join(workdir, f"{lig_name}.pdbqt")   
                     with open(lig_pdbqt, "wb") as fw:   
+                        # 回读已重置位置的文件流
+                        f_lig.seek(0)
                         fw.write(f_lig.read())   
                     lig_files = [lig_pdbqt]   
             else:   
@@ -322,6 +395,7 @@ with col_view:
                         ln = safe_filename(os.path.splitext(single.name)[0])   
                         lp = os.path.join(workdir, f"{ln}.pdbqt")   
                         with open(lp, "wb") as fw:   
+                            single.seek(0)
                             fw.write(single.read())   
                         lig_files.append(lp)   
    
