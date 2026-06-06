@@ -8,3 +8,7 @@ rdkit
 scikit-learn
 joblib
 stmol
+swig
+libboost-all-dev
+g++
+vina
