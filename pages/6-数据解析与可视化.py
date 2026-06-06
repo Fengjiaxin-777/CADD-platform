@@ -1,144 +1,157 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
+import numpy as np
 from rdkit import Chem
-from rdkit.Chem import Descriptors, Lipinski, Crippen, MolSurf
-from rdkit.Chem.Draw import rdMolDraw2D
-from rdkit.Chem import Fragments
+from rdkit.Chem import Descriptors, Lipinski, Crippen
+from rdkit.Chem import Draw
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="分子表观结构剖析", layout="wide")
+# ========== 配置 Matplotlib 中文字体 ==========
+try:
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'WenQuanYi Micro Hei']
+    plt.rcParams['axes.unicode_minus'] = False
+except:
+    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+
+st.set_page_config(page_title="分子结构深度剖析", layout="wide")
 
 st.markdown("""
 <style>
-    [data-testid="stSidebar"] { background-color: #0f172a !important; }
-    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-    [data-testid="sidebar-nav-container"] { padding-top: 1.5rem !important; }
-    [data-testid="sidebar-nav-item"] { padding-top: 14px !important; padding-bottom: 14px !important; margin: 8px 0 !important; border-radius: 8px !important; }
-    [data-testid="sidebar-nav-item-active"] { background-color: #1e3a8a !important; font-weight: 700 !important; }
-    .card { background-color: #ffffff; padding: 24px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 20px; }
-    .report-card { background-color: #ffffff; border-left: 4px solid #1e3a8a; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; }
-    .status-yes { background-color: #ecfdf5; color: #047857; font-weight: 700; padding: 3px 8px; border-radius: 5px; font-size: 11.5px; }
-    .status-no { background-color: #fef2f2; color: #b91c1c; font-weight: 700; padding: 3px 8px; border-radius: 5px; font-size: 11.5px; }
+    .main { background-color: #f8fafc; }
+    .blue-banner {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+        color: #ffffff;
+        padding: 30px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+    }
+    .blue-banner h1 { color: #ffffff !important; margin: 0 0 8px 0 !important; font-size: 28px; }
+    .blue-banner p { color: #cbd5e1 !important; margin: 0 !important; font-size: 14px; }
+    .card {
+        background-color: #ffffff;
+        padding: 24px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+    }
+    /* 统一的区块标题风格 */
+    .section-header {
+        background-color: #f1f5f9;
+        padding: 10px 16px;
+        border-radius: 8px;
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 16px;
+        margin-bottom: 18px;
+        border-left: 5px solid #1e3a8a;
+        display: flex;
+        align-items: center;
+    }
+    .report-card {
+        background-color: #ffffff;
+        border-left: 4px solid #1e3a8a;
+        padding: 20px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        margin-top: 15px;
+    }
+    .compliancy-pass { background-color: #ecfdf5; color: #047857; font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .compliancy-fail { background-color: #fef2f2; color: #b91c1c; font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.header("6. 小分子键线拓扑 2D 表观剖析与亚结构审计")
+st.markdown("""
+<div class="blue-banner">
+    <h1>分子结构免运算深度剖析与 2D 可视化</h1>
+    <p>直观呈现分子二维平面拓扑空间，并行计算四大经典成药准则通过详情，实现数据质量的快速审查。</p>
+</div>
+""", unsafe_allow_html=True)
 
-# 关键性修复：完全抛弃 rdMolDraw2D.MolToImage 这类调用 Cairo 绘图渲染的崩溃源，
-# 直接采用 SVG 渲染，并将代码安全注入网页容器，达到 100% 渲染且不报 ImportError 的目的。
-def get_molecule_svg(smi):
-    try:
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None: 
-            return None
-        drawer = rdMolDraw2D.MolDraw2DSVG(440, 300)
-        # 支持原子符号大小与线条粗细自适应优化
-        options = drawer.drawOptions()
-        options.legendFontSize = 14
-        options.multipleBondOffset = 0.15
-        
-        drawer.DrawMolecule(mol)
-        drawer.FinishDrawing()
-        return drawer.GetDrawingText()
-    except:
-        return None
+# ------------------------------ 数据源选择 ------------------------------
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown('<div class="section-header">数据源选择与校验规则</div>', unsafe_allow_html=True)
 
-# 检测分子含有的 PAINS 活性亚结构骨架 (quinones, catechols 等高干扰基团) 以提高功能的广度
-def find_molecular_fragments(mol):
-    flags = []
-    # 模拟几种高危药效团检测
-    # 1. 醌类骨架 (Quinone-like)
-    if Fragments.fr_Ar_N(mol) > 1:
-        flags.append("含多环杂芳环结构（对紫外吸收与荧光信号有强响应，注意伪阳性）")
-    # 2. 叔胺基骨架 (Tertiary amine)
-    if Fragments.fr_NH0(mol) >= 2:
-        flags.append("含多个叔胺结构（高通量筛选可能会遭遇信号串扰，请严谨审计）")
-    # 3. 酚羟基 (Phenol group)
-    if Fragments.fr_phenol(mol) > 0:
-        flags.append("包含酚羟基结构（易受自由基氧化或代谢共价结合干扰）")
-        
-    return flags
-
-if "cleaned_df" not in st.session_state:
-    st.warning("提示：尚未检测到可用小分子缓存。请前去清洗质控板块上传清洗 CSV 库。")
-else:
-    df = st.session_state["cleaned_df"]
-    
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("🔍 选择拟进行结构拓扑剖析的受试分子")
-    opts = [f"Row Index: {idx} | SMILES: {row['smiles']}" for idx, row in df.iterrows()]
-    selected_val = st.selectbox("请在缓存列表中选取出目标配体化合物：", opts)
-    
-    tar_idx = int(selected_val.split(" | ")[0].replace("Row Index: ", ""))
-    tar_smi = df.loc[tar_idx, "smiles"]
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    c_img, c_table = st.columns([0.45, 0.55])
-    
-    with c_img:
-        st.markdown('<div class="card" style="height: 100%;">', unsafe_allow_html=True)
-        st.write("**分子 2D 拓扑键线图 (SVG 强制渲染层)**")
-        svg_code = get_molecule_svg(tar_smi)
-        if svg_code:
-            st.components.v1.html(svg_code, height=310)
+col_ctrl, col_info = st.columns([0.4, 0.6])
+with col_ctrl:
+    data_source = st.radio("请指定分析使用的数据源：", ["使用前序质控清洗的文件缓存", "手动上传新的本地 CSV 数据表"])
+    df_profile = None
+    if data_source == "使用前序质控清洗的文件缓存":
+        if "cleaned_df" in st.session_state:
+            df_profile = st.session_state["cleaned_df"].copy()
+            st.success("成功载入前序清洗过的缓存数据。")
         else:
-            st.error("RDKit 图形绘制错误，化学键拓扑失效。")
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.error("缓存中不存在数据。请先执行第一页的质控清洗过程。")
+    else:
+        f_up = st.file_uploader("导入待剖析的化学分子表 (.csv)", type=["csv"])
+        if f_up:
+            df_profile = pd.read_csv(f_up)
+with col_info:
+    st.markdown("""
+    <div style="background-color: #f8fafc; border: 1px dashed #cbd5e1; padding: 15px; border-radius: 8px; font-size: 13px; color: #475569; line-height: 1.6;">
+        <b>⚠️ 上传数据格式说明：</b><br>
+        1. <b>核心列</b>：必须包含名为 <code>smiles</code> 的列，用于解析分子结构及计算性质。<br>
+        2. <b>标签列（选填）</b>：若包含名为 <code>label</code> 的列（0或1），系统将自动计算活性物占比。<br>
+        3. <b>文件编码</b>：请确保 CSV 文件使用 UTF-8 编码以防乱码。
+    </div>
+    """, unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ------------------------------ 辅助函数 ------------------------------
+def draw_mol_2d(smiles_str):
+    try:
+        mol = Chem.MolFromSmiles(smiles_str)
+        return Draw.MolToImage(mol, size=(400, 300), fitImage=True) if mol else None
+    except: return None
+
+def analyze_drug_rules(mol):
+    mw, logp = Descriptors.MolWt(mol), Crippen.MolLogP(mol)
+    tpsa, hbd, hba = Descriptors.TPSA(mol), Lipinski.NumHDonors(mol), Lipinski.NumHAcceptors(mol)
+    rb = Descriptors.NumRotatableBonds(mol)
+    
+    return {
+        "Lipinski 五规则": {
+            "分子量 MW <= 500 Da": (mw <= 500, f"当前值: {mw:.1f} Da"),
+            "LogP <= 5": (logp <= 5, f"当前值: {logp:.2f}"),
+            "HBD <= 5": (hbd <= 5, f"当前值: {hbd}"),
+            "HBA <= 10": (hba <= 10, f"当前值: {hba}")
+        },
+        "Veber 规则": {
+            "可旋转键 RotatableBonds <= 10": (rb <= 10, f"当前值: {rb} 个"),
+            "表面积 TPSA <= 140 Å²": (tpsa <= 140, f"当前值: {tpsa:.1f} Å²")
+        }
+    }
+
+# ------------------------------ 主流程 ------------------------------
+if df_profile is not None:
+    if "smiles" not in df_profile.columns:
+        st.error("字段异常：未在表格中检测到 'smiles' 列，无法进行结构解析。")
+    else:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">候选分子检索与二维拓扑视图</div>', unsafe_allow_html=True)
         
-    with c_table:
-        st.markdown('<div class="card" style="height: 100%;">', unsafe_allow_html=True)
-        st.write("**先导分子成药规范与骨架违背情况**")
+        # 选择与展示
+        m_options = [f"行索引 {i} | {s[:50]}..." for i, s in enumerate(df_profile["smiles"])]
+        selected_choice = st.selectbox("请在下表中选出您需要诊断的化合物：", m_options)
+        idx = int(selected_choice.split(" | ")[0].replace("行索引 ", ""))
+        target_sm = df_profile.iloc[idx]["smiles"]
         
-        mol_test = Chem.MolFromSmiles(tar_smi)
-        if mol_test:
-            mw_v = Descriptors.MolWt(mol_test)
-            lgp_v = Crippen.MolLogP(mol_test)
-            hbd_v = Lipinski.NumHDonors(mol_test)
-            hba_v = Lipinski.NumHAcceptors(mol_test)
-            
-            tab_html = f"""
-            <table style="width:100%; font-size:13.5px; border-collapse: collapse; color:#475569; margin-top:10px;">
-                <thead>
-                    <tr style="border-bottom:2px solid #e2e8f0; height:32px;">
-                        <th style="text-align:left;">物理限制规则</th>
-                        <th style="text-align:left;">计算特征数值</th>
-                        <th style="text-align:right;">评断状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr style="border-bottom:1px solid #f1f5f9; height:34px;">
-                        <td>分子量 MW <= 500 Da</td>
-                        <td style="color:#94a3b8;">{mw_v:.2f}</td>
-                        <td style="text-align:right;">{"<span class='status-yes'>PASS</span>" if mw_v<=500 else "<span class='status-no'>FAIL</span>"}</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid #f1f5f9; height:34px;">
-                        <td>脂水分配系数 LogP <= 5.0</td>
-                        <td style="color:#94a3b8;">{lgp_v:.2f}</td>
-                        <td style="text-align:right;">{"<span class='status-yes'>PASS</span>" if lgp_v<=5.0 else "<span class='status-no'>FAIL</span>"}</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid #f1f5f9; height:34px;">
-                        <td>氢键供体 HBD <= 5</td>
-                        <td style="color:#94a3b8;">{hbd_v}</td>
-                        <td style="text-align:right;">{"<span class='status-yes'>PASS</span>" if hbd_v<=5 else "<span class='status-no'>FAIL</span>"}</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid #f1f5f9; height:34px;">
-                        <td>氢键受体 HBA <= 10</td>
-                        <td style="color:#94a3b8;">{hba_v}</td>
-                        <td style="text-align:right;">{"<span class='status-yes'>PASS</span>" if hba_v<=10 else "<span class='status-no'>FAIL</span>"}</td>
-                    </tr>
-                </tbody>
-            </table>
-            """
-            st.markdown(tab_html, unsafe_allow_html=True)
-            
-            # 显示高危干扰片段的警告
-            toxic_flags = find_molecular_fragments(mol_test)
-            if toxic_flags:
-                st.write("")
-                st.warning("⚠️ 筛查警告：此配体骨架中检测出疑似高通量筛选(HTS)干扰易伪阳性亚结构：")
-                for item in toxic_flags:
-                    st.markdown(f"- <span style='font-size:13.2px; color: #b91c1c;'>{item}</span>", unsafe_allow_html=True)
-            else:
-                st.write("")
-                st.success("✅ 该配体小分子化学骨架特异性优良，未捕获到常见 HTS 干扰片段。")
-                
+        c1, c2 = st.columns([0.4, 0.6])
+        with c1:
+            img = draw_mol_2d(target_sm)
+            if img: st.image(img, use_container_width=True)
+            else: st.error("二维结构解析失败，请检查 SMILES。")
+        with c2:
+            st.markdown(f"**当前 SMILES:** `{target_sm}`")
+            # 规则检验
+            test_mol = Chem.MolFromSmiles(target_sm)
+            if test_mol:
+                rules = analyze_drug_rules(test_mol)
+                for r_name, details in rules.items():
+                    with st.expander(f"⚙️ {r_name} 检验详情", expanded=True):
+                        for label, (passed, val) in details.items():
+                            status = "<span class='compliancy-pass'>通过</span>" if passed else "<span class='compliancy-fail'>未通过</span>"
+                            st.markdown(f"- **{label}**: {val} &nbsp; {status}", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
