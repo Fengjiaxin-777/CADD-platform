@@ -52,17 +52,31 @@ streamlit run Home.py
 
 📂 仓库项目结构
 CADD-platform/
+
 ├── Home.py                  # 平台主页 (Portal)
+
 ├── requirements.txt         # Python 依赖清单
+
 ├── packages.txt             # Linux 系统底层包依赖清单 (如 openbabel)
+
 ├── data/                    # 示例数据与缓存文件夹
+
 └── pages/                   # 系统子功能控制页
+
     ├── 1-分子质控与物理参数初筛.py
+    
     ├── 2-分子特征探索.py
+    
     ├── 3-成药性与 ADMET 药代动力学评估.py
+    
     ├── 4-定量构效关系建模及可解释性评估.py
+    
     ├── 5-分子对接.py
+    
     └── 6-数据解析与可视化.py
+    
 ✍️ 说明
 本平台中的预测结果（如 ADMET/QSAR）为机器学习模拟值，不能完全代替体内/体外湿实验验证。
+
 3D 可视化时，如果找不到分子结构，请确保对接过程已顺利生成对应的 PDB 文件并且未被工作区清理。
+
