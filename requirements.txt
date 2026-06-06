@@ -7,6 +7,5 @@ plotly
 rdkit
 scikit-learn
 joblib
-py3Dmol
 stmol
 vina
